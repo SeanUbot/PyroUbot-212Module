@@ -1,42 +1,74 @@
-import uvloop
+# PyroUbot/__init__.py
 
+import asyncio
+
+# Pastikan event loop ada (biar gak error: "There is no current event loop")
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
+import uvloop
 uvloop.install()
 
 import logging
 import os
 import re
 
+from aiohttp import ClientSession
 from pyrogram import Client, filters
-from pyrogram.enums import ParseMode 
+from pyrogram.enums import ParseMode
 from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 from pyrogram.types import Message
 from pytgcalls import PyTgCalls
 from pytgcalls import filters as fl
 from pyromod import listen
-from PyroUbot.config import *
-from aiohttp import ClientSession
 
+from PyroUbot.config import *
+
+
+# ---------- Logging Auto Restart Handler ----------
 class ConnectionHandler(logging.Handler):
     def emit(self, record):
         for X in ["OSError", "TimeoutError"]:
             if X in record.getMessage():
+                # Restart process (opsional, sesuai code kamu)
                 os.system(f"kill -9 {os.getpid()} && python3 -m PyroUbot")
+
 
 logger = logging.getLogger()
 logger.setLevel(logging.ERROR)
 
 formatter = logging.Formatter("[%(levelname)s] - %(name)s - %(message)s", "%d-%b %H:%M")
 stream_handler = logging.StreamHandler()
-
 stream_handler.setFormatter(formatter)
+
 connection_handler = ConnectionHandler()
 
 logger.addHandler(stream_handler)
 logger.addHandler(connection_handler)
 logging.getLogger("pytgcalls").setLevel(logging.WARNING)
 
-aiosession = ClientSession()
 
+# ---------- Global aiohttp session (dibuat setelah loop aktif) ----------
+aiosession: ClientSession | None = None
+
+
+async def init_aiosession():
+    global aiosession
+    if aiosession is None or aiosession.closed:
+        aiosession = ClientSession()
+    return aiosession
+
+
+async def close_aiosession():
+    global aiosession
+    if aiosession and not aiosession.closed:
+        await aiosession.close()
+    aiosession = None
+
+
+# ---------- Bot Client ----------
 class Bot(Client):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -45,19 +77,24 @@ class Bot(Client):
         def decorator(func):
             self.add_handler(MessageHandler(func, filters), group)
             return func
-
         return decorator
 
     def on_callback_query(self, filters=None, group=-1):
         def decorator(func):
             self.add_handler(CallbackQueryHandler(func, filters), group)
             return func
-
         return decorator
 
     async def start(self):
         await super().start()
+        await init_aiosession()
 
+    async def stop(self, *args):
+        await close_aiosession()
+        return await super().stop()
+
+
+# ---------- Userbot Client ----------
 class Ubot(Client):
     __module__ = "pyrogram.client"
     _ubot = []
@@ -75,12 +112,11 @@ class Ubot(Client):
             for ub in self._ubot:
                 ub.add_handler(MessageHandler(func, filters), group)
             return func
-
         return decorator
 
     def set_prefix(self, user_id, prefix):
         self._prefix[user_id] = prefix
-    
+
     async def get_prefix(self, user_id):
         return self._prefix.get(user_id, ["."])
 
@@ -121,7 +157,6 @@ class Ubot(Client):
                             re.sub(r"\\([\"'])", r"\1", m.group(2) or m.group(3) or "")
                             for m in command_re.finditer(without_command)
                         ]
-
                         return True
 
                 return False
@@ -130,6 +165,8 @@ class Ubot(Client):
 
     async def start(self):
         await super().start()
+        await init_aiosession()
+
         await self.call_py.start()
         handler = await get_pref(self.me.id)
         if handler:
@@ -141,7 +178,16 @@ class Ubot(Client):
         self._translate[self.me.id] = "id"
         print(f"[INFO] - ({self.me.id}) - STARTED")
 
+    async def stop(self, *args):
+        try:
+            await self.call_py.stop()
+        except Exception:
+            pass
+        await close_aiosession()
+        return await super().stop()
 
+
+# ---------- Instances ----------
 bot = Bot(
     name="bot",
     bot_token=BOT_TOKEN,
@@ -152,6 +198,8 @@ bot = Bot(
 
 ubot = Ubot(name="ubot")
 
+
+# ---------- Load Core ----------
 from PyroUbot.core.database import *
 from PyroUbot.core.function import *
 from PyroUbot.core.helpers import *
